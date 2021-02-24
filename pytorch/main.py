@@ -55,6 +55,8 @@ args = parser.parse_args()
 doLoad = not args.reset # Load checkpoint at the beginning
 doTest = args.sink # Only run test, no training
 
+print("doLoad: {}, doTest: {}".format(doLoad, doTest))
+
 workers = 16
 epochs = 25
 batch_size = torch.cuda.device_count()*100 # Change if out of cuda memory

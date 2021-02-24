@@ -2,7 +2,10 @@ import math, shutil, os, time, argparse, json, re, sys
 import numpy as np
 import scipy.io as sio
 from PIL import Image
-
+import multiprocessing
+from multiprocessing import Queue
+from operator import itemgetter
+import pprint as pp
 
 '''
 Prepares the GazeCapture dataset for use with the pytorch code. Crops images, compiles JSONs into metadata.mat
@@ -31,23 +34,17 @@ parser.add_argument('--dataset_path', help="Path to extracted files. It should h
 parser.add_argument('--output_path', default=None, help="Where to write the output. Can be the same as dataset_path if you wish (=default).")
 args = parser.parse_args()
 
+g_meta_queue = Queue()
+g_meta_list = []
+g_meta = {
+        'labelRecNum': [],
+        'frameIndex': [],
+        'labelDotXCam': [],
+        'labelDotYCam': [],
+        'labelFaceGrid': [],
+    }
 
-
-def main():
-    if args.output_path is None:
-        args.output_path = args.dataset_path
-    
-    if args.dataset_path is None or not os.path.isdir(args.dataset_path):
-        raise RuntimeError('No such dataset folder %s!' % args.dataset_path)
-
-    preparePath(args.output_path)
-
-    # list recordings
-    recordings = os.listdir(args.dataset_path)
-    recordings = np.array(recordings, np.object)
-    recordings = recordings[[os.path.isdir(os.path.join(args.dataset_path, r)) for r in recordings]]
-    recordings.sort()
-
+def process_recording(recordings, thread_id):
     # Output structure
     meta = {
         'labelRecNum': [],
@@ -58,7 +55,7 @@ def main():
     }
 
     for i,recording in enumerate(recordings):
-        print('[%d/%d] Processing recording %s (%.2f%%)' % (i, len(recordings), recording, i / len(recordings) * 100))
+        print('[%d/%d] Thread %d Processing recording %s (%.2f%%)' % (i, len(recordings), thread_id, recording, i / len(recordings) * 100))
         recDir = os.path.join(args.dataset_path, recording)
         recDirOut = os.path.join(args.output_path, recording)
 
@@ -141,13 +138,98 @@ def main():
             meta['labelDotYCam'] += [dotInfo['YCam'][j]]
             meta['labelFaceGrid'] += [faceGridBbox[j,:]]
 
+    return meta
+
+def run_process(thread_id, name, recordings):
+    print("Starting " + name)
+
+    meta = process_recording(recordings, thread_id)
+    meta_tup = (thread_id, meta) # Tuple so we can sort later on
+
+    # Add to global thread-safe queue
+    g_meta_queue.put(meta_tup)
+
+    print("{} finished. Processed {} recordings".format(name, len(recordings)))
+
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+def split(a, n):
+    k, m = divmod(len(a), n)
+    return (a[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n))
+
+
+def main():
+    if args.output_path is None:
+        args.output_path = args.dataset_path
+    
+    if args.dataset_path is None or not os.path.isdir(args.dataset_path):
+        raise RuntimeError('No such dataset folder %s!' % args.dataset_path)
+
+    preparePath(args.output_path)
+
+    # list recordings
+    recordings = os.listdir(args.dataset_path)
+    recordings = np.array(recordings, np.object)
+    recordings = recordings[[os.path.isdir(os.path.join(args.dataset_path, r)) for r in recordings]]
+    recordings.sort()
+
+    NUM_THREADS = 15
+#     num_recordings = len(recordings)
+    # Max number of recordings a thread can have. 
+    # Thus, (N-1) threads will have M recordings each. The last thread will have the remainder.
+#     max_recordings_per_thread = math.ceil(num_recordings/NUM_THREADS)
+    
+    # Split recordings into approximately equal sized chunks for each thread
+    chunked_recordings = list(split(recordings, NUM_THREADS))
+    processes = []
+    pp.pprint(chunked_recordings)
+    num_processes = 0
+
+    for i,recording in enumerate(chunked_recordings):
+        # Start parallel processes
+        name = "Thread " + str(i)
+        p = multiprocessing.Process(target=run_process, args=(i, name, recording))
+        processes.append((i, p))
+        p.start()
+        num_processes += 1
+
+    meta_list = []
+    num_processes_remaining = int(num_processes)
+    
+    while num_processes_remaining > 0:
+        while not g_meta_queue.empty():
+            meta_list.append(g_meta_queue.get())
+            num_processes_remaining -= 1
+            print("{} processes remaining".format(num_processes_remaining))
+            
+        time.sleep(5)
+        
+    for p_tup in processes:
+        p_id, p = p_tup
+        # Join processes
+        p.join()
+        print("Joined process {}".format(p_id))
+
+    # Sort meta_list in order of thread id (so lower thread num comes first)
+    meta_list.sort(key=itemgetter(0))
+
+    for item in meta_list:
+        thread_id, meta = item
+
+        for key in meta:
+            g_meta[key] += meta[key]
+    
+    print("Created g_meta database")
     
     # Integrate
-    meta['labelRecNum'] = np.stack(meta['labelRecNum'], axis = 0).astype(np.int16)
-    meta['frameIndex'] = np.stack(meta['frameIndex'], axis = 0).astype(np.int32)
-    meta['labelDotXCam'] = np.stack(meta['labelDotXCam'], axis = 0)
-    meta['labelDotYCam'] = np.stack(meta['labelDotYCam'], axis = 0)
-    meta['labelFaceGrid'] = np.stack(meta['labelFaceGrid'], axis = 0).astype(np.uint8)
+    g_meta['labelRecNum'] = np.stack(g_meta['labelRecNum'], axis = 0).astype(np.int16)
+    g_meta['frameIndex'] = np.stack(g_meta['frameIndex'], axis = 0).astype(np.int32)
+    g_meta['labelDotXCam'] = np.stack(g_meta['labelDotXCam'], axis = 0)
+    g_meta['labelDotYCam'] = np.stack(g_meta['labelDotYCam'], axis = 0)
+    g_meta['labelFaceGrid'] = np.stack(g_meta['labelFaceGrid'], axis = 0).astype(np.uint8)
 
     # Load reference metadata
     print('Will compare to the reference GitHub dataset metadata.mat...')
@@ -161,7 +243,7 @@ def main():
     reference['labelTest'] = reference['labelTest'].flatten()
 
     # Find mapping
-    mKey = np.array(['%05d_%05d' % (rec, frame) for rec, frame in zip(meta['labelRecNum'], meta['frameIndex'])], np.object)
+    mKey = np.array(['%05d_%05d' % (rec, frame) for rec, frame in zip(g_meta['labelRecNum'], g_meta['frameIndex'])], np.object)
     rKey = np.array(['%05d_%05d' % (rec, frame) for rec, frame in zip(reference['labelRecNum'], reference['frameIndex'])], np.object)
     mIndex = {k: i for i,k in enumerate(mKey)}
     rIndex = {k: i for i,k in enumerate(rKey)}
@@ -180,26 +262,26 @@ def main():
             #break
 
     # Copy split from reference
-    meta['labelTrain'] = np.zeros((len(meta['labelRecNum'],)),np.bool)
-    meta['labelVal'] = np.ones((len(meta['labelRecNum'],)),np.bool) # default choice
-    meta['labelTest'] = np.zeros((len(meta['labelRecNum'],)),np.bool)
+    g_meta['labelTrain'] = np.zeros((len(g_meta['labelRecNum'],)),np.bool)
+    g_meta['labelVal'] = np.ones((len(g_meta['labelRecNum'],)),np.bool) # default choice
+    g_meta['labelTest'] = np.zeros((len(g_meta['labelRecNum'],)),np.bool)
 
     validMappingMask = mToR >= 0
-    meta['labelTrain'][validMappingMask] = reference['labelTrain'][mToR[validMappingMask]]
-    meta['labelVal'][validMappingMask] = reference['labelVal'][mToR[validMappingMask]]
-    meta['labelTest'][validMappingMask] = reference['labelTest'][mToR[validMappingMask]]
+    g_meta['labelTrain'][validMappingMask] = reference['labelTrain'][mToR[validMappingMask]]
+    g_meta['labelVal'][validMappingMask] = reference['labelVal'][mToR[validMappingMask]]
+    g_meta['labelTest'][validMappingMask] = reference['labelTest'][mToR[validMappingMask]]
 
     # Write out metadata
     metaFile = os.path.join(args.output_path, 'metadata.mat')
     print('Writing out the metadata.mat to %s...' % metaFile)
-    sio.savemat(metaFile, meta)
+    sio.savemat(metaFile, g_meta)
     
     # Statistics
     nMissing = np.sum(rToM < 0)
     nExtra = np.sum(mToR < 0)
     totalMatch = len(mKey) == len(rKey) and np.all(np.equal(mKey, rKey))
     print('======================\n\tSummary\n======================')    
-    print('Total added %d frames from %d recordings.' % (len(meta['frameIndex']), len(np.unique(meta['labelRecNum']))))
+    print('Total added %d frames from %d recordings.' % (len(g_meta['frameIndex']), len(np.unique(g_meta['labelRecNum']))))
     if nMissing > 0:
         print('There are %d frames missing in the new dataset. This may affect the results. Check the log to see which files are missing.' % nMissing)
     else:
