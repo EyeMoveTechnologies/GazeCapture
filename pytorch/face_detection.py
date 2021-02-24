@@ -1,7 +1,7 @@
 import cv2
 import sys
 import numpy as np
-# from eye_tracking_filter import Filter
+from eye_tracking_filter import Filter, Box
 
 cascPath = sys.argv[1]
 eyeCascPath = sys.argv[2]
@@ -14,6 +14,10 @@ cam = cv2.VideoCapture("v4l2src device=/dev/video0 ! videorate ! video/x-raw, fo
 
 DETECT_FACES = False
 
+
+w, h = 224,224
+fil = Filter(w, h)
+
 while True:
 
     ret, frame = cam.read()
@@ -21,7 +25,6 @@ while True:
     if ret:
 
         # Rescale
-        w, h = 224,224
         center = frame.shape[0]/2, frame.shape[1]/2
         x = center[1] - w/2
         y = center[0] - h/2
@@ -62,11 +65,25 @@ while True:
                 outputRejectLevels = True
             )
 
+            boxes = []
             for i, (ex,ey,ew,eh) in enumerate(eyes):
-                cv2.rectangle(frame,(ex,ey),(ex+ew,ey+eh),(np.random.randint(0, 255),np.random.randint(0, 255),np.random.randint(0, 255)),2)
-                print(weights[i])
-                cv2.putText(frame, "{:.1f}".format(weights[i][0]),(ex, ey), cv2.FONT_HERSHEY_PLAIN, 1, (255,255,255) )
+                box = Box((ex, ey), ew, eh)
+                boxes += [box]
 
+            # Apply temporal filter to predictions
+            r, boxL, boxR = fil.update(boxes)
+            if not r:
+                continue
+
+            x0,y0,x1,y1 = boxL.corners()
+            cv2.rectangle(frame,(x0,y0),(x1,y1),(255,0,0),2)
+
+            x0,y0,x1,y1 = boxR.corners()
+            cv2.rectangle(frame,(x0,y0),(x1,y1),(0,255,0),2)
+
+            # print(weights[i])
+            # cv2.putText(frame, "{:.1f}".format(weights[i][0]),(ex, ey), cv2.FONT_HERSHEY_PLAIN, 1, (255,255,255) )
+            
             
         cv2.imshow("Faces found", frame[:,::-1])
         cv2.waitKey(1)
