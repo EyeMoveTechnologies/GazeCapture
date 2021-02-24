@@ -1,5 +1,6 @@
 import cv2
 import sys
+import numpy as np
 # from eye_tracking_filter import Filter
 
 cascPath = sys.argv[1]
@@ -26,8 +27,6 @@ while True:
         y = center[0] - h/2
         print(type(frame))
         frame = frame[int(y):int(y+h), int(x):int(x+w)]
-        # cv2.imshow("Faces found", frame)
-        # cv2.waitKey(1)
 
         # Convert to grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -47,7 +46,6 @@ while True:
 
             # Draw a rectangle around the faces
             for (x, y, w, h) in faces:
-                # print(type(frame))
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 eyes, neighs, weights = eyeCascade.detectMultiScale3(gray[y:y+h, x:x+w])
 
@@ -58,15 +56,16 @@ while True:
             eyes, neighs, weights = eyeCascade.detectMultiScale3(
                 gray,
                 scaleFactor=1.1,
-                minNeighbors=5,
+                minNeighbors=5, 
                 minSize=(30, 30),
                 flags = cv2.CASCADE_SCALE_IMAGE,
                 outputRejectLevels = True
             )
 
-            for (ex,ey,ew,eh) in eyes:
-                cv2.rectangle(frame,(ex,ey),(ex+ew,ey+eh),(255,0,0),2)
-                # cv2.putText(frame, "{}".format(), )
+            for i, (ex,ey,ew,eh) in enumerate(eyes):
+                cv2.rectangle(frame,(ex,ey),(ex+ew,ey+eh),(np.random.randint(0, 255),np.random.randint(0, 255),np.random.randint(0, 255)),2)
+                print(weights[i])
+                cv2.putText(frame, "{:.1f}".format(weights[i][0]),(ex, ey), cv2.FONT_HERSHEY_PLAIN, 1, (255,255,255) )
 
             
         cv2.imshow("Faces found", frame[:,::-1])
